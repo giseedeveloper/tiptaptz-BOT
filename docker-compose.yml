@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    container_name: tiptop-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+      # Laravel bill push → POST /notify (NOTIFY_PORT inside container, default 3001).
+      # Host 3002 avoids collision with other Node apps on the same VPS (e.g. PM2
+      # `whatsapp-service` often binds host :3001). Do not stop those bots — use 3002 here.
+      - "3002:3001"

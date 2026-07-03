@@ -10,12 +10,16 @@ const qrcode = require('qrcode-terminal');
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const { handleMessage } = require('./handler.js');
+const { startNotifyServer } = require('./notify-server.js');
 
 console.log('╔════════════════════════════════════════════════════════════════╗');
-console.log('║                    TIPTAP WhatsApp Bot                          ║');
+console.log('║                      TipTap WhatsApp                             ║');
 console.log('║         Restaurant Ordering System via WhatsApp                 ║');
 console.log('╚════════════════════════════════════════════════════════════════╝');
 console.log('');
+
+let activeSock = null;
+startNotifyServer(() => activeSock);
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -35,6 +39,7 @@ async function connectToWhatsApp() {
             return { conversation: 'hello' };
         }
     });
+    activeSock = sock;
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -67,7 +72,7 @@ async function connectToWhatsApp() {
         } else if (connection === 'open') {
             console.log('');
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            console.log('✅ TIPTAP Bot is now ONLINE and ready to receive messages!');
+            console.log('✅ TipTap is now ONLINE and ready to receive messages!');
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             console.log('');
         }
@@ -96,7 +101,7 @@ async function connectToWhatsApp() {
 
     // Handle graceful shutdown
     process.on('SIGINT', () => {
-        console.log('\n👋 Shutting down TIPTAP Bot...');
+        console.log('\n👋 Shutting down TipTap...');
         process.exit(0);
     });
 }

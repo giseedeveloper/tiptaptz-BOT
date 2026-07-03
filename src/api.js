@@ -77,10 +77,12 @@ module.exports = {
      */
     createOrder: async (orderData) => {
         const totalAmount = orderData.items.reduce((sum, item) => sum + (item.price * item.qty), 0);
-        const response = await api.post('/order', {
+        const payload = {
             restaurant_id: orderData.restaurant_id,
             table_number: orderData.table_number,
             customer_phone: orderData.customer_phone,
+            waiter_id: orderData.waiter_id,
+            customer_name: orderData.customer_name,
             total: totalAmount,
             items: orderData.items.map(item => ({
                 menu_item_id: item.menu_id,
@@ -89,8 +91,42 @@ module.exports = {
                 total: parseFloat(item.price) * item.qty,
                 subtotal: parseFloat(item.price) * item.qty
             }))
-        });
+        };
+
+        if (orderData.table_id) payload.table_id = orderData.table_id;
+        payload.whatsapp_jid = orderData.whatsapp_jid ?? null;
+
+        const response = await api.post('/order', payload);
         return response.data;
+    },
+
+    /**
+     * 5b. Create Order via Text (Smart Matching)
+     * POST /api/bot/order/text
+     * Body: { restaurant_id, table_number, customer_phone, order_text }
+     */
+    createOrderText: async (data) => {
+        try {
+            const payload = {
+                restaurant_id: data.restaurant_id,
+                customer_phone: data.customer_phone,
+                order_text: data.order_text
+            };
+
+            if (data.table_id) payload.table_id = data.table_id;
+            if (data.table_number) payload.table_number = data.table_number;
+            if (data.waiter_id) payload.waiter_id = data.waiter_id;
+            if (data.customer_name) payload.customer_name = data.customer_name;
+            payload.whatsapp_jid = data.whatsapp_jid ?? null;
+
+            const response = await api.post('/order/text', payload);
+            return response.data;
+        } catch (error) {
+            if (error.response && error.response.data) {
+                return error.response.data;
+            }
+            throw error;
+        }
     },
 
     /**
@@ -107,7 +143,7 @@ module.exports = {
             const res2 = await api.get('/tables', { params: { restaurant_id: restaurantId } });
             return res2.data;
         } catch (e) {
-            console.log('Bot tables API failed, falling back to manager API...');
+            console.log('TipTap tables API failed, falling back to manager API...');
             return module.exports.getManagerTables();
         }
     },
@@ -133,14 +169,14 @@ module.exports = {
         console.log('📱 [USSD] Data:', {
             phone: paymentData.phone,
             amount: paymentData.amount,
-            provider: paymentData.provider
+            network: paymentData.network
         });
 
         const response = await api.post('/payment/ussd', {
             order_id: paymentData.order_id,
             phone_number: paymentData.phone,
             amount: paymentData.amount,
-            provider: paymentData.provider
+            network: paymentData.network
         });
 
         console.log('✅ [USSD] API Response:', JSON.stringify(response.data, null, 2));
@@ -174,18 +210,32 @@ module.exports = {
     },
 
     /**
+     * Check if waiter is online (before call-waiter).
+     * GET /api/bot/waiter/{waiterId}/status
+     * Response: { success, data: { waiter_id, name, is_online, last_online_at } }
+     */
+    getWaiterStatus: async (waiterId) => {
+        const response = await api.get(`/waiter/${waiterId}/status`);
+        return response.data;
+    },
+
+    /**
      * 10. Call Waiter / Request Bill
      * POST /api/bot/call-waiter
      * Body: { restaurant_id, table_number, request_type }
      * Response: { success, message }
      */
     callWaiter: async (data) => {
-        const response = await api.post('/call-waiter', {
+        const payload = {
             restaurant_id: data.restaurant_id,
-            table_number: data.table_number,
-            request_type: data.request_type, // Support both
-            type: data.request_type
-        });
+            type: data.request_type, // 'call_waiter' or 'request_bill'
+            table_number: data.table_number || ""
+        };
+
+        if (data.waiter_id) payload.waiter_id = data.waiter_id;
+        if (data.table_id) payload.table_id = data.table_id;
+
+        const response = await api.post('/call-waiter', payload);
         return response.data;
     },
 
@@ -207,6 +257,67 @@ module.exports = {
     getWaiters: async (restaurantId) => {
         const response = await api.get(`/restaurant/${restaurantId}/waiters`);
         return response.data;
+    },
+
+    /**
+     * 13. Get Menu PDF (WhatsApp document)
+     * GET /api/bot/restaurant/{restaurantId}/menu-pdf
+     */
+    getMenuPdf: async (restaurantId) => {
+        try {
+            const response = await api.get(`/restaurant/${restaurantId}/menu-pdf`);
+            return response.data;
+        } catch (error) {
+            console.error('Get menu PDF error:', error.response?.data || error.message);
+            return { success: false, message: 'No menu PDF available' };
+        }
+    },
+
+    /** @deprecated Use getMenuPdf */
+    getMenuImage: async (restaurantId) => api.getMenuPdf(restaurantId),
+
+    /**
+     * 14. Initiate Quick Payment (Payment bila Order, or Tip kwa waiter)
+     * POST /api/bot/payment/quick
+     * When waiter_id is sent, backend creates a Tip record when payment is confirmed.
+     */
+    initiateQuickPayment: async (paymentData) => {
+        const payload = {
+            restaurant_id: paymentData.restaurant_id,
+            phone_number: paymentData.phone_number,
+            amount: parseInt(paymentData.amount),
+            description: paymentData.description,
+            network: paymentData.network
+        };
+        if (paymentData.waiter_id) payload.waiter_id = paymentData.waiter_id;
+        const response = await api.post('/payment/quick', payload);
+        return response.data;
+    },
+
+    /**
+     * 15. Check Quick Payment Status
+     * GET /api/bot/payment/quick/{paymentId}/status
+     */
+    checkQuickPaymentStatus: async (paymentId) => {
+        const response = await api.get(`/payment/quick/${paymentId}/status`);
+        return response.data;
+    },
+
+    /**
+     * 16. Parse Entry (Identify QR/Tag)
+     * POST /api/bot/parse-entry
+     * Body: { entry: "SMK-W01" }
+     */
+    parseEntry: async (entry) => {
+        try {
+            // Reverted to POST because server returned MethodNotAllowed for GET.
+            // Using 'input' as the key as per instructions.
+            const response = await api.post('/parse-entry', { input: entry });
+            return response.data;
+        } catch (error) {
+            console.error('Parse entry error:', error.response?.data || error.message);
+            return { success: false, message: 'Invalid entry' };
+        }
     },
 
     // ═══════════════════════════════════════════════════════════════
@@ -256,5 +367,14 @@ module.exports = {
             }
         });
         return response.data;
-    }
+    },
+
+    /**
+     * Global welcome card branding (logo + title + optional body).
+     * GET /api/bot/branding
+     */
+    getBranding: async () => {
+        const response = await api.get('/branding');
+        return response.data;
+    },
 };
