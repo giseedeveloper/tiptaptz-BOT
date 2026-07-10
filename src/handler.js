@@ -439,7 +439,11 @@ function isLeaveCommand(text) {
 // ═══════════════════════════════════════════════════════════════
 async function handleEntry(sock, from, session, text) {
     try {
-        const result = await api.parseEntry(text);
+        const customerPhone = from.split('@')[0];
+        const result = await api.parseEntry(text, {
+            wa_id: customerPhone,
+            customer_phone: customerPhone,
+        });
         console.log('🔍 Parse Entry Result:', JSON.stringify(result, null, 2));
 
         if (result.type === 'waiter') {
@@ -745,23 +749,7 @@ async function handlePickTableForOrderState(sock, from, session, text) {
     let tableNumber = null;
     let tableId = null;
     const tables = session.order_tables || [];
-    if (session.menu_options && session.menu_options[text]) {
-        const tableKey = session.menu_options[text];
-        if (tableKey.startsWith('table_')) {
-            tableId = tableKey.replace('table_', '');
-            const t = tables.find(tbl => String(tbl.id) === String(tableId));
-            if (t) {
-                tableNumber = t.name;
-                tableId = String(t.id);
-            }
-        }
-    } else if (tables.length > 0) {
-        const t = tables.find(tbl => String(tbl.name) === String(text) || String(tbl.id) === String(text));
-        if (t) {
-            tableNumber = t.name;
-            tableId = String(t.id);
-        }
-    }
+    ({ tableNumber, tableId } = resolveTableFromInput(text, tables, session.menu_options || {}));
     if (!tableNumber && !tableId) {
         // Accept any table number as free text (e.g. "5") so order goes with that table even if not in list
         const trimmed = String(text).trim();
@@ -872,6 +860,59 @@ function isValidManualTableInput(text) {
     return !isBotMenuButtonId(trimmed);
 }
 
+/**
+ * Resolve a table from user input. Handles:
+ * - Smart-menu mapped values like "table_42" (after user typed "1")
+ * - Raw list numbers ("1", "2")
+ * - Table names ("Mawenzi")
+ */
+function resolveTableFromInput(text, tables, menuOptions = {}) {
+    const normalized = String(text || '').trim();
+    let tableNumber = null;
+    let tableId = null;
+
+    const applyTable = (t) => {
+        if (!t) {
+            return false;
+        }
+        tableNumber = t.name;
+        tableId = String(t.id);
+        return true;
+    };
+
+    if (normalized.startsWith('table_')) {
+        const id = normalized.replace('table_', '');
+        applyTable(tables.find(tbl => String(tbl.id) === String(id)));
+        return { tableNumber, tableId };
+    }
+
+    if (menuOptions[normalized]) {
+        const tableKey = menuOptions[normalized];
+        if (String(tableKey).startsWith('table_')) {
+            const id = String(tableKey).replace('table_', '');
+            applyTable(tables.find(tbl => String(tbl.id) === String(id)));
+            return { tableNumber, tableId };
+        }
+    }
+
+    if (tables.length > 0) {
+        const byName = tables.find(tbl =>
+            String(tbl.name).toLowerCase() === normalized.toLowerCase()
+            || String(tbl.id) === normalized
+        );
+        if (applyTable(byName)) {
+            return { tableNumber, tableId };
+        }
+
+        const index = parseInt(normalized, 10);
+        if (!Number.isNaN(index) && index >= 1 && index <= tables.length) {
+            applyTable(tables[index - 1]);
+        }
+    }
+
+    return { tableNumber, tableId };
+}
+
 async function handleCallWaiterAskTableState(sock, from, session, text) {
     if (text === 'home') {
         session.state = 'HOME';
@@ -885,22 +926,8 @@ async function handleCallWaiterAskTableState(sock, from, session, text) {
     }
     let tableNumber = null;
     let tableId = null;
-    if (session.menu_options && session.menu_options[text]) {
-        const tableKey = session.menu_options[text];
-        if (tableKey.startsWith('table_')) {
-            tableId = tableKey.replace('table_', '');
-            const t = (session.call_waiter_tables || []).find(tbl => String(tbl.id) === String(tableId));
-            if (t) {
-                tableNumber = t.name;
-            }
-        }
-    } else if (session.call_waiter_tables && session.call_waiter_tables.length > 0) {
-        const t = session.call_waiter_tables.find(tbl => String(tbl.name) === String(text) || String(tbl.id) === String(text));
-        if (t) {
-            tableNumber = t.name;
-            tableId = String(t.id);
-        }
-    }
+    const tables = session.call_waiter_tables || [];
+    ({ tableNumber, tableId } = resolveTableFromInput(text, tables, session.menu_options || {}));
     if (tableNumber || tableId) {
         if (tableNumber) session.table_number = tableNumber;
         if (tableId) session.table_id = tableId;
@@ -2108,7 +2135,13 @@ async function handleMenuSelectionState(sock, from, session, text) {
 async function showMenuImage(sock, from, session) {
     session.state = 'MENU_IMAGE_ORDER';
 
-    const result = await api.getMenuPdf(session.restaurant_id);
+    const customerPhone = from.split('@')[0];
+    const result = await api.getMenuPdf(session.restaurant_id, {
+        wa_id: customerPhone,
+        customer_phone: customerPhone,
+        table_id: session.table_id,
+        table_number: session.table_number,
+    });
     const pdfUrl = result.success ? result.data?.menu_pdf_url : null;
     const fileName = result.data?.filename || 'menu.pdf';
 

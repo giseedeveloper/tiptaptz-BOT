@@ -263,9 +263,16 @@ module.exports = {
      * 13. Get Menu PDF (WhatsApp document)
      * GET /api/bot/restaurant/{restaurantId}/menu-pdf
      */
-    getMenuPdf: async (restaurantId) => {
+    getMenuPdf: async (restaurantId, context = {}) => {
         try {
-            const response = await api.get(`/restaurant/${restaurantId}/menu-pdf`);
+            const response = await api.get(`/restaurant/${restaurantId}/menu-pdf`, {
+                params: {
+                    wa_id: context.wa_id,
+                    customer_phone: context.customer_phone,
+                    table_id: context.table_id,
+                    table_number: context.table_number,
+                },
+            });
             return response.data;
         } catch (error) {
             console.error('Get menu PDF error:', error.response?.data || error.message);
@@ -308,11 +315,15 @@ module.exports = {
      * POST /api/bot/parse-entry
      * Body: { entry: "SMK-W01" }
      */
-    parseEntry: async (entry) => {
+    parseEntry: async (entry, context = {}) => {
         try {
             // Reverted to POST because server returned MethodNotAllowed for GET.
             // Using 'input' as the key as per instructions.
-            const response = await api.post('/parse-entry', { input: entry });
+            const response = await api.post('/parse-entry', {
+                input: entry,
+                wa_id: context.wa_id,
+                customer_phone: context.customer_phone,
+            });
             return response.data;
         } catch (error) {
             console.error('Parse entry error:', error.response?.data || error.message);
