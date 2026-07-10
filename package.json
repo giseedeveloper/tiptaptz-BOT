@@ -1,23 +1,25 @@
 {
-  "name": "v1",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "tiptopbot",
+  "version": "2.0.0",
+  "description": "TipTap WhatsApp bot — Cloud API (Meta) integration",
+  "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "whatsapp",
+    "cloud-api",
+    "tiptap",
+    "restaurant"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "libsignal-node": "^2.0.1",
-    "pino": "^10.1.0",
-    "qrcode-terminal": "^0.12.0"
+    "form-data": "^4.0.4"
   }
 }

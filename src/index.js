@@ -1,113 +1,57 @@
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason,
-    fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
-const pino = require('pino');
-const qrcode = require('qrcode-terminal');
+/**
+ * TipTap WhatsApp bot — entry point (Cloud API edition).
+ *
+ * Inbound  ← Express /webhook or Laravel-forwarded /inbound → handler.js
+ * Outbound → Meta Graph API via src/whatsapp.js
+ */
+
+const express = require('express');
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
-const { handleMessage } = require('./handler.js');
-const { startNotifyServer } = require('./notify-server.js');
+const { registerWebhookRoutes } = require('./webhook-server');
+const { registerNotifyRoutes } = require('./notify-server');
+
+const PORT = parseInt(process.env.PORT, 10) || 3000;
+const BIND = process.env.BIND || '0.0.0.0';
 
 console.log('╔════════════════════════════════════════════════════════════════╗');
-console.log('║                      TipTap WhatsApp                             ║');
-console.log('║         Restaurant Ordering System via WhatsApp                 ║');
+console.log('║                  TipTap WhatsApp — Cloud API                  ║');
+console.log('║      Powered by Meta Graph API · Sessions in MySQL            ║');
 console.log('╚════════════════════════════════════════════════════════════════╝');
-console.log('');
 
-let activeSock = null;
-startNotifyServer(() => activeSock);
+const app = express();
 
-async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-    const { version, isLatest } = await fetchLatestBaileysVersion();
+app.use(express.json({
+    limit: '512kb',
+    verify: (req, _res, buf) => {
+        req.rawBody = buf.toString('utf8');
+    },
+}));
 
-    console.log(`📱 Using WhatsApp Web v${version.join('.')}, isLatest: ${isLatest}`);
-    console.log(`🌐 API Base URL: ${process.env.API_BASE_URL}`);
-    console.log(`🔑 BOT_TOKEN loaded: ${process.env.BOT_TOKEN ? 'Yes (starts with ' + process.env.BOT_TOKEN.substring(0, 5) + '...)' : 'No'}`);
-    console.log('');
-
-    const sock = makeWASocket({
-        version,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        auth: state,
-        getMessage: async (key) => {
-            return { conversation: 'hello' };
-        }
+app.get('/health', (_req, res) => {
+    res.json({
+        ok: true,
+        service: 'tiptopbot',
+        version: '2.0.0',
+        time: new Date().toISOString(),
     });
-    activeSock = sock;
+});
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
+registerWebhookRoutes(app);
+registerNotifyRoutes(app);
 
-        if (qr) {
-            console.log('');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            console.log('📲 Scan QR code below with WhatsApp (Linked Devices > Link a Device):');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            qrcode.generate(qr, { small: true });
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        }
+app.use((err, _req, res, _next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({ ok: false, error: 'internal_error' });
+});
 
-        if (connection === 'close') {
-            const statusCode = (lastDisconnect?.error instanceof Boom)
-                ? lastDisconnect.error.output.statusCode
-                : null;
+app.listen(PORT, BIND, () => {
+    console.log(`📡 Listening on http://${BIND}:${PORT}`);
+    console.log(`🌐 Laravel API:      ${process.env.API_BASE_URL || '(not set)'}`);
+    console.log(`📞 Phone Number ID:  ${process.env.WHATSAPP_PHONE_NUMBER_ID || '(missing!)'}`);
+});
 
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-            console.log('');
-            console.log(`❌ Connection closed. Reason: ${lastDisconnect?.error?.message || 'Unknown'}`);
-
-            if (shouldReconnect) {
-                console.log('🔄 Reconnecting in 3 seconds...');
-                setTimeout(() => connectToWhatsApp(), 3000);
-            } else {
-                console.log('🚪 Logged out. Please delete auth_info_baileys folder and restart.');
-            }
-        } else if (connection === 'open') {
-            console.log('');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            console.log('✅ TipTap is now ONLINE and ready to receive messages!');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            console.log('');
-        }
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('messages.upsert', async (m) => {
-        if (m.type === 'notify') {
-            for (const msg of m.messages) {
-                if (!msg.key.fromMe && msg.message) {
-                    const from = msg.key.remoteJid;
-                    const msgType = Object.keys(msg.message)[0];
-
-                    console.log(`📩 [${new Date().toLocaleTimeString()}] Message from ${from}: ${msgType}`);
-
-                    try {
-                        await handleMessage(sock, msg);
-                    } catch (error) {
-                        console.error('❌ Error handling message:', error);
-                    }
-                }
-            }
-        }
-    });
-
-    // Handle graceful shutdown
-    process.on('SIGINT', () => {
-        console.log('\n👋 Shutting down TipTap...');
-        process.exit(0);
-    });
-}
-
-// Start the bot
-connectToWhatsApp().catch(err => {
-    console.error('❌ Failed to start bot:', err);
-    process.exit(1);
+process.on('SIGINT', () => {
+    console.log('👋 Shutting down…');
+    process.exit(0);
 });
