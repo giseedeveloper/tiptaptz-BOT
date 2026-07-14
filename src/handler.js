@@ -2,6 +2,7 @@ const api = require('./api');
 const whatsapp = require('./whatsapp');
 const sessionStore = require('./session-store');
 const { T } = require('./lang');
+const { itemEtaMinutes, cartEtaMinutes, formatEtaLabel } = require('./eta');
 const {
     TAP,
     tapFooter,
@@ -246,7 +247,12 @@ async function processMessage(from, session, initialText, contact, _message) {
                 break;
 
             case 'TIP':
-                await handleTipState(sock, from, session, text);
+            case 'POST_PAYMENT_TIP':
+                await handlePostPaymentTipState(sock, from, session, text);
+                break;
+
+            case 'POST_PAYMENT_TIP_STAFF':
+                await handlePostPaymentTipStaffState(sock, from, session, text);
                 break;
 
             case 'CALL_WAITER':
@@ -399,6 +405,8 @@ function createNewSession() {
         quick_payment_network: null,
         tip_waiter_id: null,
         tip_waiter_name: null,
+        tip_pool_id: null,
+        tip_pool_name: null,
         feedback_waiter_id: null,
         feedback_waiter_name: null,
         bill_image_sent_for_order: null,
@@ -604,10 +612,21 @@ async function handleHomeState(sock, from, session, text) {
     } else if (t === 'live_bill' || t === 'pay_bill' || t.includes('bill') || t.includes('lipa')) {
         await showLiveBillOptions(sock, from, session);
     } else if (t === 'give_tips' || t.includes('tip')) {
+        let autoTipOk = false;
         if (session.waiter_id && session.waiter_name) {
-            // Auto-select assigned waiter
+            try {
+                const tippable = await api.getWaiters(session.restaurant_id, { tippableOnly: true });
+                autoTipOk = !!(tippable?.success && Array.isArray(tippable.data)
+                    && tippable.data.some((w) => String(w.id) === String(session.waiter_id)));
+            } catch (e) {
+                console.error('Tippable waiter check error:', e);
+            }
+        }
+        if (autoTipOk) {
             session.tip_waiter_id = session.waiter_id;
             session.tip_waiter_name = session.waiter_name;
+            delete session.tip_pool_id;
+            delete session.tip_pool_name;
             session.quick_payment_desc = `Tip for ${session.tip_waiter_name}`;
             await showQuickPaymentAmount(sock, from, session);
         } else {
@@ -1183,7 +1202,7 @@ async function handleCashPaymentState(sock, from, session, text) {
             await sendText(sock, from,
                 '✅ Thank you!\n\nWaiting for waiter to confirm payment...'
             );
-            await showPostPaymentOptions(sock, from, session);
+            await offerPostPaymentTipOrContinue(sock, from, session);
             break;
         case 'track_order':
             await showTrackStatus(sock, from, session);
@@ -1335,31 +1354,7 @@ async function handleFeedbackCommentState(sock, from, session, text) {
     await showHomeScreen(sock, from, session);
 }
 
-async function handleTipState(sock, from, session, text) {
-    if (text.startsWith('tip_')) {
-        const amount = text.replace('tip_', '');
-        if (amount !== 'skip') {
-            if (!session.active_order_id) {
-                await sendText(sock, from, '⚠️ You cannot tip without an active order.');
-            } else {
-                try {
-                    await api.submitTip({
-                        restaurant_id: session.restaurant_id,
-                        order_id: session.active_order_id,
-                        amount: parseInt(amount)
-                    });
-                    await sendText(sock, from, `💝 Thanks for the tip of Tsh ${amount}!`);
-                } catch (e) {
-                    console.error('Tip error:', e);
-                    await sendText(sock, from, '❌ Error sending tip. Try again.');
-                }
-            }
-        }
 
-        await sendText(sock, from, `🎉 ${T(session, 'thanks_using_tiptap')}`);
-        await showHomeScreen(sock, from, session);
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════
 // SCREEN BUILDERS
@@ -1371,8 +1366,13 @@ async function showHomeScreen(sock, from, session) {
     delete session.pending_order_text;
     delete session.tip_waiter_id;
     delete session.tip_waiter_name;
+    delete session.tip_pool_id;
+    delete session.tip_pool_name;
     delete session.feedback_waiter_id;
     delete session.feedback_waiter_name;
+    delete session.is_post_payment_tip;
+    delete session.post_payment_tip_options;
+    delete session.post_payment_tip_staff_role;
     session.quick_payment_desc = null;
 
     const name = session.restaurant_name || 'Restaurant';
@@ -1538,11 +1538,14 @@ async function showItemsList(sock, from, session, categoryId) {
             }
         });
 
-        const rows = category.menu_items.map(i => ({
-            id: `item_${i.id}`,
-            title: `🍲${i.name.replace(/\s/g, '')} - ${i.price.toLocaleString()}/=`,
-            description: `${i.price.toLocaleString()}/=`
-        }));
+        const rows = category.menu_items.map(i => {
+            const eta = itemEtaMinutes(i);
+            return {
+                id: `item_${i.id}`,
+                title: `🍲${i.name.replace(/\s/g, '')} - ${i.price.toLocaleString()}/=`,
+                description: `⏱${eta} min · ${i.price.toLocaleString()}/=`
+            };
+        });
 
         await sendList(sock, from, `🍽️${category.name.toUpperCase().replace(/\s/g, '')}`, 'Foods', [
             {
@@ -1574,9 +1577,13 @@ async function showItemDetail(sock, from, session, itemId) {
         return await showMenuHub(sock, from, session);
     }
 
+    const etaMinutes = itemEtaMinutes(item);
+    const etaText = formatEtaLabel(etaMinutes, session.lang || 'en');
+
     const text =
         `🍲*${item.name.replace(/\s/g, '')}*\n` +
         `💰${item.price?.toLocaleString()}/=\n` +
+        `⏱*${etaText}*\n` +
         `${item.description ? `📝${item.description}\n` : ''}`;
 
     const buttons = [
@@ -1634,22 +1641,30 @@ async function addToCart(sock, from, session, itemId, qty) {
     if (!item) return;
 
     const existing = session.cart.find(c => c.menu_id == itemId);
+    const prepMinutes = itemEtaMinutes(item);
     if (existing) {
         existing.qty += qty;
+        existing.preparation_time = prepMinutes;
+        existing.eta_minutes = prepMinutes;
     } else {
         session.cart.push({
             menu_id: itemId,
             name: item.name,
             price: item.price,
-            qty: qty
+            qty: qty,
+            preparation_time: prepMinutes,
+            eta_minutes: prepMinutes,
         });
     }
 
     const total = session.cart.reduce((sum, i) => sum + (i.price * i.qty), 0);
+    const orderEta = cartEtaMinutes(session.cart);
+    const etaText = formatEtaLabel(orderEta, session.lang || 'en');
 
     await sendButtons(sock, from,
         `✅*Added!*\n` +
         `${item.name} x${qty}\n` +
+        `⏱${etaText}\n` +
         `Total: ${total.toLocaleString()}/=`,
         [
             { id: 'continue_menu', text: '➕Continue' },
@@ -1678,11 +1693,15 @@ async function showCart(sock, from, session) {
     let total = 0;
     session.cart.forEach((item, i) => {
         const subtotal = item.price * item.qty;
-        text += `${i + 1}.${item.name} x${item.qty}=${subtotal.toLocaleString()}/=\n`;
+        const lineEta = itemEtaMinutes(item);
+        text += `${i + 1}.${item.name} x${item.qty}=${subtotal.toLocaleString()}/= (⏱${lineEta}m)\n`;
         total += subtotal;
     });
+    const orderEta = cartEtaMinutes(session.cart);
+    text += `⏱*${formatEtaLabel(orderEta, session.lang || 'en')}*\n`;
     text += `💰*Total: ${total.toLocaleString()}/=*`;
     session.order_total = total;
+    session.order_eta_minutes = orderEta;
 
     await sendList(sock, from, text, 'Choose', [
         {
@@ -1868,12 +1887,8 @@ async function checkPaymentStatus(sock, from, session) {
     try {
         const result = await api.getOrderStatus(session.active_order_id);
         if (result.payment_status === 'paid') {
-            await sendButtons(sock, from, '✅ *Payment Confirmed!* Thank you.', [
-                { id: 'track_order', text: '📍 Track Order' },
-                { id: 'go_feedback', text: '💬 Feedback' },
-                { id: 'home', text: '🏠 Home' }
-            ]);
-            session.state = 'HOME';
+            await sendText(sock, from, '✅ *Payment Confirmed!* Thank you.');
+            await offerPostPaymentTipOrContinue(sock, from, session);
         } else {
             const status = result.status || 'Pending';
             const payStatus = result.payment_status || 'Pending';
@@ -1906,11 +1921,319 @@ async function showManualUssd(sock, from, session) {
 }
 
 async function showPostPaymentOptions(sock, from, session) {
+    session.state = 'HOME';
     await sendButtons(sock, from, 'What would you like to do next?', [
         { id: 'track_order', text: '📍 Track Order' },
         { id: 'rate_service', text: '⭐ Rate Service' },
         { id: 'home', text: '🏠 Home' }
     ]);
+}
+
+/**
+ * Optional post-payment tip: Waiter / Barista / Kitchen / Split + amounts.
+ * Skips when no recipients are available or tip was already offered/done.
+ */
+async function offerPostPaymentTipOrContinue(sock, from, session) {
+    if (session.post_payment_tip_done) {
+        await showPostPaymentOptions(sock, from, session);
+        return;
+    }
+
+    try {
+        const preferred = session.waiter_id || session.tip_waiter_id || null;
+        const result = await api.getPostPaymentTipOptions(session.restaurant_id, preferred);
+        const options = result?.data?.options || {};
+        const available = ['waiter', 'barista', 'kitchen', 'split']
+            .some((key) => options[key]?.available);
+
+        if (!result?.success || !available) {
+            session.post_payment_tip_done = true;
+            await showPostPaymentOptions(sock, from, session);
+            return;
+        }
+
+        session.post_payment_tip_options = result.data;
+        await showPostPaymentTipOffer(sock, from, session);
+    } catch (e) {
+        console.error('Post-payment tip options error:', e);
+        await showPostPaymentOptions(sock, from, session);
+    }
+}
+
+async function showPostPaymentTipOffer(sock, from, session) {
+    session.state = 'POST_PAYMENT_TIP';
+    const options = session.post_payment_tip_options?.options || {};
+    const rows = [];
+
+    if (options.waiter?.available) {
+        const name = options.waiter.default?.name;
+        rows.push({
+            id: 'tip_opt_waiter',
+            title: '🙋 Waiter',
+            description: name ? `Tip ${name}` : 'Tip your waiter',
+        });
+    }
+    if (options.barista?.available) {
+        const name = options.barista.default?.name;
+        rows.push({
+            id: 'tip_opt_barista',
+            title: '☕ Barista',
+            description: name ? `Tip ${name}` : 'Tip a barista',
+        });
+    }
+    if (options.kitchen?.available) {
+        rows.push({
+            id: 'tip_opt_kitchen',
+            title: '🍳 Kitchen',
+            description: options.kitchen.pool?.name || 'Kitchen tip pool',
+        });
+    }
+    if (options.split?.available) {
+        rows.push({
+            id: 'tip_opt_split',
+            title: '➗ Split',
+            description: options.split.description || '50% staff · 50% kitchen',
+        });
+    }
+    rows.push({ id: 'tip_skip', title: 'Skip tip', description: 'Continue without tipping' });
+
+    await sendList(
+        sock,
+        from,
+        '💝 *Optional tip*\nThank you for paying! Who would you like to tip?',
+        'Choose recipient',
+        [{ title: 'Tip recipient', rows }],
+        '💝✨',
+    );
+}
+
+function clearTipRecipient(session) {
+    delete session.tip_waiter_id;
+    delete session.tip_waiter_name;
+    delete session.tip_pool_id;
+    delete session.tip_pool_name;
+}
+
+async function handlePostPaymentTipState(sock, from, session, text) {
+    const t = String(text || '').trim();
+    const options = session.post_payment_tip_options?.options || {};
+
+    if (t === 'tip_skip' || t === 'home' || t === 'skip') {
+        session.post_payment_tip_done = true;
+        clearTipRecipient(session);
+        await showPostPaymentOptions(sock, from, session);
+        return;
+    }
+
+    if (t === 'tip_opt_waiter') {
+        const staff = options.waiter?.staff || [];
+        if (staff.length > 1) {
+            session.post_payment_tip_staff_role = 'waiter';
+            await showPostPaymentTipStaffPick(sock, from, session, staff, 'Waiter');
+            return;
+        }
+        const pick = options.waiter?.default || staff[0];
+        if (!pick) {
+            await showPostPaymentTipOffer(sock, from, session);
+            return;
+        }
+        clearTipRecipient(session);
+        session.tip_waiter_id = pick.id;
+        session.tip_waiter_name = pick.name;
+        session.quick_payment_desc = `Tip for ${pick.name}`;
+        session.is_post_payment_tip = true;
+        await showPostPaymentTipAmounts(sock, from, session);
+        return;
+    }
+
+    if (t === 'tip_opt_barista') {
+        const staff = options.barista?.staff || [];
+        if (staff.length > 1) {
+            session.post_payment_tip_staff_role = 'barista';
+            await showPostPaymentTipStaffPick(sock, from, session, staff, 'Barista');
+            return;
+        }
+        const pick = options.barista?.default || staff[0];
+        if (!pick) {
+            await showPostPaymentTipOffer(sock, from, session);
+            return;
+        }
+        clearTipRecipient(session);
+        session.tip_waiter_id = pick.id;
+        session.tip_waiter_name = pick.name;
+        session.quick_payment_desc = `Tip for barista ${pick.name}`;
+        session.is_post_payment_tip = true;
+        await showPostPaymentTipAmounts(sock, from, session);
+        return;
+    }
+
+    if (t === 'tip_opt_kitchen') {
+        const pool = options.kitchen?.pool;
+        if (!pool) {
+            await showPostPaymentTipOffer(sock, from, session);
+            return;
+        }
+        clearTipRecipient(session);
+        session.tip_pool_id = pool.id;
+        session.tip_pool_name = pool.name || 'Kitchen tip pool';
+        session.quick_payment_desc = `Kitchen tip pool: ${session.tip_pool_name}`;
+        session.is_post_payment_tip = true;
+        await showPostPaymentTipAmounts(sock, from, session);
+        return;
+    }
+
+    if (t === 'tip_opt_split') {
+        const staff = options.split?.staff;
+        const pool = options.split?.pool;
+        if (!staff || !pool) {
+            await showPostPaymentTipOffer(sock, from, session);
+            return;
+        }
+        clearTipRecipient(session);
+        session.tip_waiter_id = staff.id;
+        session.tip_waiter_name = staff.name;
+        session.tip_pool_id = pool.id;
+        session.tip_pool_name = pool.name || 'Kitchen tip pool';
+        session.quick_payment_desc = `Split tip: ${staff.name} + ${session.tip_pool_name}`;
+        session.is_post_payment_tip = true;
+        await showPostPaymentTipAmounts(sock, from, session);
+        return;
+    }
+
+    // Legacy tip_500 / tip_1000 / tip_skip from old TIP screen
+    if (t.startsWith('tip_') && !t.startsWith('tip_opt_') && !t.startsWith('tip_amt_') && !t.startsWith('tip_waiter_') && !t.startsWith('tip_pool_') && !t.startsWith('tip_staff_')) {
+        await handleTipAmountState(sock, from, session, t);
+        return;
+    }
+
+    await showPostPaymentTipOffer(sock, from, session);
+}
+
+async function showPostPaymentTipStaffPick(sock, from, session, staff, label) {
+    session.state = 'POST_PAYMENT_TIP_STAFF';
+    const rows = staff.map((s) => ({
+        id: `tip_staff_${s.id}|${s.name}`,
+        title: `👤 ${s.name}`,
+        description: `Tip this ${label.toLowerCase()}`,
+    }));
+    rows.push({ id: 'tip_skip', title: 'Skip tip' });
+
+    await sendList(
+        sock,
+        from,
+        `💝 *Choose ${label}*`,
+        `Select ${label}`,
+        [{ title: label, rows }],
+        '💝✨',
+    );
+}
+
+async function handlePostPaymentTipStaffState(sock, from, session, text) {
+    const t = String(text || '').trim();
+    if (t === 'tip_skip' || t === 'home') {
+        session.post_payment_tip_done = true;
+        clearTipRecipient(session);
+        await showPostPaymentOptions(sock, from, session);
+        return;
+    }
+
+    if (t.startsWith('tip_staff_')) {
+        const parts = t.replace('tip_staff_', '').split('|');
+        clearTipRecipient(session);
+        session.tip_waiter_id = parts[0];
+        session.tip_waiter_name = parts[1] || 'Staff';
+        const role = session.post_payment_tip_staff_role === 'barista' ? 'barista ' : '';
+        session.quick_payment_desc = `Tip for ${role}${session.tip_waiter_name}`.trim();
+        session.is_post_payment_tip = true;
+        await showPostPaymentTipAmounts(sock, from, session);
+        return;
+    }
+
+    await showPostPaymentTipOffer(sock, from, session);
+}
+
+async function showPostPaymentTipAmounts(sock, from, session) {
+    session.state = 'TIP_AMOUNT';
+    const suggestions = session.post_payment_tip_options?.suggestions || {};
+    const fallbackAmounts = session.post_payment_tip_options?.amounts || [500, 1000, 2000, 5000];
+    const who = session.tip_waiter_name
+        || session.tip_pool_name
+        || 'team';
+
+    // Base bill amount for percentage suggestions (order total when known).
+    const baseAmount = Number(session.order_total) > 0 ? Number(session.order_total) : 0;
+    const usePercent = suggestions.mode === 'percent'
+        && Array.isArray(suggestions.percentages)
+        && suggestions.percentages.length > 0
+        && baseAmount > 0;
+
+    const rows = [];
+    if (usePercent) {
+        for (const pct of suggestions.percentages) {
+            const amount = Math.max(1, Math.round((baseAmount * Number(pct)) / 100));
+            rows.push({
+                id: `tip_amt_${amount}`,
+                title: `${pct}% · ${amount.toLocaleString()}/=`,
+                description: `Tip ${who}`,
+            });
+        }
+    } else {
+        for (const amount of fallbackAmounts) {
+            rows.push({
+                id: `tip_amt_${amount}`,
+                title: `${Number(amount).toLocaleString()}/=`,
+                description: `Tip ${who}`,
+            });
+        }
+    }
+    rows.push({ id: 'tip_skip', title: 'Skip tip', description: 'Continue without tipping' });
+
+    const hint = usePercent ? '\n_Based on your bill_' : '';
+
+    await sendList(
+        sock,
+        from,
+        `💝 *Tip amount*\nWho: *${who}*${hint}`,
+        'Choose amount',
+        [{ title: 'Amounts', rows }],
+        '💝✨',
+    );
+}
+
+async function handleTipAmountState(sock, from, session, text) {
+    const t = String(text || '').trim();
+
+    if (t === 'tip_skip' || t === 'skip' || t === 'home') {
+        session.post_payment_tip_done = true;
+        clearTipRecipient(session);
+        delete session.is_post_payment_tip;
+        await showPostPaymentOptions(sock, from, session);
+        return;
+    }
+
+    let amount = null;
+    if (t.startsWith('tip_amt_')) {
+        amount = parseInt(t.replace('tip_amt_', ''), 10);
+    } else if (t.startsWith('tip_') && t !== 'tip_skip') {
+        amount = parseInt(t.replace('tip_', ''), 10);
+    } else {
+        amount = parseInt(t.replace(/,/g, ''), 10);
+    }
+
+    if (!amount || Number.isNaN(amount) || amount <= 0) {
+        await sendText(sock, from, `❌ ${T(session, 'invalid_amount')}`);
+        await showPostPaymentTipAmounts(sock, from, session);
+        return;
+    }
+
+    session.quick_payment_amount = amount;
+    session.is_post_payment_tip = true;
+    await showQuickPaymentPhone(sock, from, session);
+}
+
+async function showTipScreen(sock, from, session) {
+    // Kept for compatibility — routes into the post-payment tip offer.
+    await offerPostPaymentTipOrContinue(sock, from, session);
 }
 
 async function showTrackStatus(sock, from, session) {
@@ -1929,12 +2252,16 @@ async function showTrackStatus(sock, from, session) {
         await maybeSendBillImage(sock, from, session, order);
 
         const statusIcons = {
-            'pending': '⏳ Pending',
-            'confirmed': '✅ Confirmed',
+            'pending': '⏳ Received',
+            'received': '⏳ Received',
+            'confirmed': '✅ Accepted',
+            'accepted': '✅ Accepted',
             'preparing': '👨‍🍳 Preparing',
             'ready': '🍽️ Ready',
             'served': '✅ Served',
-            'paid': '💰 Paid'
+            'paid': '✔️ Completed',
+            'completed': '✔️ Completed',
+            'cancelled': '❌ Cancelled',
         };
 
         let text = `📍 *Order #${order.id}*\n`;
@@ -2062,15 +2389,6 @@ async function showWaitersList(sock, from, session) {
         console.error('Fetch waiters error:', e);
         await showCallWaiterOptions(sock, from, session);
     }
-}
-
-async function showTipScreen(sock, from, session) {
-    session.state = 'TIP';
-    await sendButtons(sock, from, '💝*Tip for Waiter?*\nChoose amount:', [
-        { id: 'tip_500', text: '500/=' },
-        { id: 'tip_1000', text: '1,000/=' },
-        { id: 'tip_skip', text: 'Skip' }
-    ], '💝✨');
 }
 
 async function handleSearchRestaurant(sock, from, session, query) {
@@ -2241,6 +2559,10 @@ async function showLiveBillOptions(sock, from, session) {
     // Clear tip info when paying bill
     delete session.tip_waiter_id;
     delete session.tip_waiter_name;
+    delete session.tip_pool_id;
+    delete session.tip_pool_name;
+    delete session.is_post_payment_tip;
+    delete session.post_payment_tip_done;
     session.quick_payment_desc = 'Bill Payment';
 
     // If no table number, we can't fetch an active order, so go straight to quick payment
@@ -2288,7 +2610,9 @@ async function showQuickPaymentAmount(sock, from, session) {
     session.state = 'QUICK_PAYMENT_AMOUNT';
     const msg = session.tip_waiter_id && session.tip_waiter_name
         ? `💰 ${T(session, 'tip_amount')} ${session.tip_waiter_name.toUpperCase()} (Tsh):`
-        : `💰 ${T(session, 'enter_amount')}`;
+        : session.tip_pool_id
+            ? `💰 Tip amount for kitchen pool (Tsh):`
+            : `💰 ${T(session, 'enter_amount')}`;
     await sendText(sock, from, msg);
 }
 
@@ -2313,6 +2637,7 @@ async function initiateQuickPayment(sock, from, session) {
             network: detectNetwork(session.ussd_phone)
         };
         if (session.tip_waiter_id) payload.waiter_id = session.tip_waiter_id;
+        if (session.tip_pool_id) payload.tip_pool_id = session.tip_pool_id;
         const result = await api.initiateQuickPayment(payload);
 
         if (result.success) {
@@ -2345,7 +2670,7 @@ async function handleQuickPaymentPendingState(sock, from, session, text) {
         const result = await api.checkQuickPaymentStatus(session.quick_payment_id);
         if (result.success && result.status === 'paid') {
             await sendText(sock, from, '✅ Malipo yamethibitishwa! Asante.');
-            await showHomeScreen(sock, from, session);
+            await afterQuickPaymentConfirmed(sock, from, session);
         } else {
             await sendText(sock, from, `⏳ Status: ${result.status || 'Pending'}. Bado tunasubiri...`);
             await sendButtons(sock, from, 'Chagua:', [
@@ -2358,18 +2683,62 @@ async function handleQuickPaymentPendingState(sock, from, session, text) {
     }
 }
 
+async function afterQuickPaymentConfirmed(sock, from, session) {
+    const wasTip = !!(session.tip_waiter_id || session.tip_pool_id);
+
+    if (wasTip) {
+        const tipThanks = session.tip_waiter_name || session.tip_pool_name
+            ? `💝 Asante kwa tip! (${session.tip_waiter_name || session.tip_pool_name})`
+            : '💝 Asante kwa tip!';
+        await sendText(sock, from, tipThanks);
+
+        if (session.is_post_payment_tip) {
+            session.post_payment_tip_done = true;
+            delete session.is_post_payment_tip;
+            clearTipRecipient(session);
+            await showPostPaymentOptions(sock, from, session);
+            return;
+        }
+
+        clearTipRecipient(session);
+        await showHomeScreen(sock, from, session);
+        return;
+    }
+
+    await offerPostPaymentTipOrContinue(sock, from, session);
+}
+
 async function showWaiterTipList(sock, from, session) {
     session.state = 'SELECT_WAITER_TIP';
     try {
-        const result = await api.getWaiters(session.restaurant_id);
-        if (result.success && result.data.length > 0) {
-            const rows = result.data.map(w => ({
-                id: `tip_waiter_${w.id}|${w.name}`,
-                title: `👤 ${w.name}`,
-                description: T(session, 'tip_waiter_tap_tip'),
-            }));
-            rows.push({ id: 'home', title: `🏠 ${T(session, 'home')}` });
+        const [result, pools] = await Promise.all([
+            api.getWaiters(session.restaurant_id, { tippableOnly: true }),
+            api.getTipPools(session.restaurant_id).catch(() => ({ success: false, data: [] })),
+        ]);
 
+        const rows = [];
+        if (pools?.success && Array.isArray(pools.data)) {
+            for (const pool of pools.data) {
+                rows.push({
+                    id: `tip_pool_${pool.id}|${pool.name}`,
+                    title: `🍳 ${pool.name}`,
+                    description: `Shared tip · ${pool.member_count || 0} kitchen staff`,
+                });
+            }
+        }
+
+        if (result.success && result.data.length > 0) {
+            for (const w of result.data) {
+                rows.push({
+                    id: `tip_waiter_${w.id}|${w.name}`,
+                    title: `👤 ${w.name}`,
+                    description: T(session, 'tip_waiter_tap_tip'),
+                });
+            }
+        }
+
+        if (rows.length > 0) {
+            rows.push({ id: 'home', title: `🏠 ${T(session, 'home')}` });
             await sendList(
                 sock,
                 from,
@@ -2379,7 +2748,7 @@ async function showWaiterTipList(sock, from, session) {
                 '💝✨',
             );
         } else {
-            await sendText(sock, from, T(session, 'waiters_list_empty'));
+            await sendText(sock, from, '💝 Digital tipping is not enabled for any staff or kitchen pool right now.');
             await showHomeScreen(sock, from, session);
         }
     } catch (e) {
@@ -2389,10 +2758,20 @@ async function showWaiterTipList(sock, from, session) {
 }
 
 async function handleSelectWaiterTipState(sock, from, session, text) {
-    if (text.startsWith('tip_waiter_')) {
+    if (text.startsWith('tip_pool_')) {
+        const parts = text.replace('tip_pool_', '').split('|');
+        session.tip_pool_id = parts[0];
+        session.tip_pool_name = parts[1] || 'Kitchen tip pool';
+        delete session.tip_waiter_id;
+        delete session.tip_waiter_name;
+        session.quick_payment_desc = `Kitchen tip pool: ${session.tip_pool_name}`;
+        await showQuickPaymentAmount(sock, from, session);
+    } else if (text.startsWith('tip_waiter_')) {
         const parts = text.replace('tip_waiter_', '').split('|');
         session.tip_waiter_id = parts[0];
         session.tip_waiter_name = parts[1];
+        delete session.tip_pool_id;
+        delete session.tip_pool_name;
         session.quick_payment_desc = `Tip for ${session.tip_waiter_name}`;
         await showQuickPaymentAmount(sock, from, session);
     } else if (text === 'home') {
@@ -2597,14 +2976,14 @@ async function startPaymentPolling(sock, from, session, type, id) {
                 });
                 if (result.payment_status === 'paid') {
                     await sendText(sock, from, '✅ *Payment Confirmed!* Thank you for your payment.');
-                    await showHomeScreen(sock, from, session);
+                    await offerPostPaymentTipOrContinue(sock, from, session);
                     clearInterval(interval);
                 }
             } else {
                 result = await api.checkQuickPaymentStatus(id);
                 if (result.success && result.status === 'paid') {
                     await sendText(sock, from, '✅ *Payment Confirmed!* Thank you for your payment.');
-                    await showHomeScreen(sock, from, session);
+                    await afterQuickPaymentConfirmed(sock, from, session);
                     clearInterval(interval);
                 }
             }

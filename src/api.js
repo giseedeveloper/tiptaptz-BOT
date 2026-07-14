@@ -254,8 +254,37 @@ module.exports = {
      * 12. List Waiters
      * GET /api/bot/restaurant/{id}/waiters
      */
-    getWaiters: async (restaurantId) => {
-        const response = await api.get(`/restaurant/${restaurantId}/waiters`);
+    getWaiters: async (restaurantId, options = {}) => {
+        const params = {};
+        if (options.tippableOnly) {
+            params.tippable_only = 1;
+        }
+        if (options.role) {
+            params.role = options.role;
+        }
+        const response = await api.get(`/restaurant/${restaurantId}/waiters`, { params });
+        return response.data;
+    },
+
+    /**
+     * Active tip pools (e.g. kitchen) customers can tip.
+     * GET /api/bot/restaurant/{id}/tip-pools
+     */
+    getTipPools: async (restaurantId) => {
+        const response = await api.get(`/restaurant/${restaurantId}/tip-pools`);
+        return response.data;
+    },
+
+    /**
+     * Post-payment tipping options (Waiter / Barista / Kitchen / Split + amounts).
+     * GET /api/bot/restaurant/{id}/post-payment-tip-options
+     */
+    getPostPaymentTipOptions: async (restaurantId, waiterId = null) => {
+        const params = {};
+        if (waiterId) {
+            params.waiter_id = waiterId;
+        }
+        const response = await api.get(`/restaurant/${restaurantId}/post-payment-tip-options`, { params });
         return response.data;
     },
 
@@ -297,6 +326,7 @@ module.exports = {
             network: paymentData.network
         };
         if (paymentData.waiter_id) payload.waiter_id = paymentData.waiter_id;
+        if (paymentData.tip_pool_id) payload.tip_pool_id = paymentData.tip_pool_id;
         const response = await api.post('/payment/quick', payload);
         return response.data;
     },

@@ -105,11 +105,12 @@ function buildServiceSections(session, T) {
     if (integratedPaymentsEnabled) {
         allRows.push(
             { id: 'live_bill', title: `💳 ${T(session, 'pay_bill')}`, description: T(session, 'tap_pay_methods') },
-            { id: 'give_tips', title: `💵 ${T(session, 'tip')}`, description: tipDesc },
         );
     }
 
+    // Tip stays visible even when integrated bill/M-Pesa payments are off.
     allRows.push(
+        { id: 'give_tips', title: `💵 ${T(session, 'tip')}`, description: tipDesc },
         { id: 'rate_service', title: `⭐ ${T(session, 'tap_rate_service')}`, description: rateDesc },
         { id: 'change_language', title: `🌐 ${T(session, 'change_language')}`, description: T(session, 'change_language_desc') },
         { id: 'exit_bot', title: `❌ ${T(session, 'tap_exit')}`, description: T(session, 'exit_desc') },
