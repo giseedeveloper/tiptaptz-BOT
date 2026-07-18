@@ -12,7 +12,7 @@ const {
     buildCallWaiterSent,
     buildLanguagePrompt,
 } = require('./brand');
-const { isEntryCode, shouldOfferWelcome } = require('./greetings');
+const { isEntryCode, shouldOfferWelcome, isGreeting } = require('./greetings');
 
 /**
  * Process-local cache of the active session for each WhatsApp id.
@@ -105,6 +105,13 @@ async function processMessage(from, session, initialText, contact, _message) {
     // GLOBAL: 0 = Back to main menu (from any state)
     // ═══════════════════════════════════════════════════════════════
     if (text === '0') {
+        session.state = 'HOME';
+        await showHomeScreen(sock, from, session);
+        return;
+    }
+
+    // GLOBAL: a greeting inside an active session returns to the main menu (prevents stuck states)
+    if (session.restaurant_id && isGreeting(text)) {
         session.state = 'HOME';
         await showHomeScreen(sock, from, session);
         return;
@@ -1258,6 +1265,9 @@ async function handlePayNowState(sock, from, session, text) {
     switch (text) {
         case 'paynow':
             await initiateUssdPayment(sock, from, session);
+            break;
+        case 'pay_cash':
+            await showCashPayment(sock, from, session);
             break;
         case 'change_number':
             session.state = 'USSD_NUMBER';
