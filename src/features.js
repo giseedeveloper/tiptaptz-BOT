@@ -1,12 +1,12 @@
 /**
- * Feature flags — set INTEGRATED_PAYMENTS_ENABLED=true in .env when M-Pesa / bill / tip flows are ready.
- * Default: hidden (cash-only in order flow).
+ * Feature flags — integrated payments (M-Pesa / bill / tip USSD push) are ON by default;
+ * set INTEGRATED_PAYMENTS_ENABLED=false in .env to hide them again.
  *
  * BOT_ORDER_ENABLED=false (default): menu is PDF-only; waiters take orders via Live Order app.
  */
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
-const integratedPaymentsEnabled = process.env.INTEGRATED_PAYMENTS_ENABLED === 'true';
+const integratedPaymentsEnabled = process.env.INTEGRATED_PAYMENTS_ENABLED !== 'false';
 const botOrderEnabled = process.env.BOT_ORDER_ENABLED === 'true';
 
 const BOT_ORDER_DISABLED_STATES = new Set([
