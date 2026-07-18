@@ -215,6 +215,10 @@ async function processMessage(from, session, initialText, contact, _message) {
                 await handleProviderSelectState(sock, from, session, text);
                 break;
 
+            case 'USSD_AMOUNT':
+                await handleUssdAmountState(sock, from, session, text);
+                break;
+
             case 'USSD_NUMBER':
                 await handleUssdNumberState(sock, from, session, text);
                 break;
@@ -1187,8 +1191,13 @@ async function handlePaymentSummaryState(sock, from, session, text) {
             await showCashPayment(sock, from, session);
             break;
         case 'pay_mobile':
-            session.state = 'USSD_NUMBER';
-            await sendText(sock, from, `📱 ${T(session, 'enter_phone_billed')}`);
+            if (Number(session.order_total) > 0) {
+                session.state = 'USSD_NUMBER';
+                await sendText(sock, from, `📱 ${T(session, 'enter_phone_billed')}`);
+            } else {
+                session.state = 'USSD_AMOUNT';
+                await sendText(sock, from, `💰 ${T(session, 'enter_amount')}`);
+            }
             break;
         case 'home':
             await showHomeScreen(sock, from, session);
@@ -1220,6 +1229,17 @@ async function handleProviderSelectState(sock, from, session, text) {
         await sendText(sock, from, `📱 ${T(session, 'enter_phone_billed')}`);
     } else if (text === 'back_payment') {
         await showPaymentSummary(sock, from, session);
+    }
+}
+
+async function handleUssdAmountState(sock, from, session, text) {
+    const amount = parseInt(text.replace(/,/g, ''));
+    if (!isNaN(amount) && amount > 0) {
+        session.order_total = amount;
+        session.state = 'USSD_NUMBER';
+        await sendText(sock, from, `📱 ${T(session, 'enter_phone_billed')}`);
+    } else {
+        await sendText(sock, from, `❌ ${T(session, 'invalid_amount')}`);
     }
 }
 
@@ -1854,6 +1874,11 @@ async function showPayNow(sock, from, session) {
 }
 
 async function initiateUssdPayment(sock, from, session) {
+    if (!(Number(session.order_total) > 0)) {
+        session.state = 'USSD_AMOUNT';
+        await sendText(sock, from, `💰 ${T(session, 'enter_amount')}`);
+        return;
+    }
     try {
         const result = await api.initiateUssdPayment({
             order_id: session.active_order_id,
