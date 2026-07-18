@@ -604,6 +604,12 @@ async function handleHomeState(sock, from, session, text) {
         return;
     }
 
+    // Pay Now (from order confirmation) → go straight to the bill / payment options
+    if (t === 'go_payment') {
+        await showPaymentSummary(sock, from, session);
+        return;
+    }
+
     // New Menu Options Mapping
     // Menu = menu PDF only (no list menu from main screen)
     if (t === 'view_menu' || t.includes('menu')) {
